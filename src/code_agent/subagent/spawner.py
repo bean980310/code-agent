@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 from ..client import create_client, extract_text_from_blocks
 from ..tools.base import get_tool, get_tool_definitions
 from ..types import AgentConfig
+from ..ui import get_terminal_ui
 
 
 class SubAgentSpawner:
@@ -45,6 +45,7 @@ class SubAgentSpawner:
         )
         client = create_client(child_config)
         model_name = child_config.resolved_model()
+        ui = get_terminal_ui()
 
         # Determine tool set
         if tool_names is None:
@@ -63,7 +64,7 @@ class SubAgentSpawner:
         messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
         system_blocks = [{"type": "text", "text": system_prompt}]
 
-        print(f"[subagent] Spawning ({model_name}) task: {task[:80]}...", file=sys.stderr)
+        ui.subagent(f"spawn {model_name}: {task[:80]}...")
 
         for turn in range(max_turns):
             response = await client.create_message(
@@ -76,7 +77,7 @@ class SubAgentSpawner:
 
             if response.stop_reason == "end_turn":
                 result = extract_text_from_blocks(response.content)
-                print(f"[subagent] Completed in {turn + 1} turns", file=sys.stderr)
+                ui.subagent(f"completed in {turn + 1} turns")
                 return result
 
             if response.stop_reason == "tool_use":

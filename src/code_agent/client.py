@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import sys
 from abc import ABC, abstractmethod
 from typing import Any
 
 from .types import AgentConfig, AgentResponse, Usage
+from .ui import get_terminal_ui
 
 
 class ProviderAPIError(Exception):
@@ -45,11 +45,7 @@ class BaseModelClient(ABC):
         tools: list[dict[str, Any]],
     ) -> AgentResponse:
         """Fallback streaming path for providers without incremental output handling."""
-        response = await self.create_message(messages=messages, system=system, tools=tools)
-        text = extract_text_from_blocks(response.content)
-        if text:
-            print(text, file=sys.stdout)
-        return response
+        return await self.create_message(messages=messages, system=system, tools=tools)
 
     @abstractmethod
     async def create_message_simple(
@@ -100,6 +96,9 @@ class AnthropicClient(BaseModelClient):
         system: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> AgentResponse:
+        ui = get_terminal_ui()
+        streamed = False
+
         try:
             async with self.client.messages.stream(
                 model=self.config.resolved_model(),
@@ -109,15 +108,16 @@ class AnthropicClient(BaseModelClient):
                 tools=tools if tools else self._anthropic.NOT_GIVEN,
             ) as stream:
                 async for text in stream.text_stream:
-                    print(text, end="", flush=True, file=sys.stdout)
-                print(file=sys.stdout)
+                    if text:
+                        streamed = True
+                        ui.stream_text(text)
                 final_message = await stream.get_final_message()
         except self._anthropic.APIStatusError as exc:
             raise ProviderAPIError(exc.message, status_code=exc.status_code) from exc
         except self._anthropic.APIConnectionError as exc:
             raise ProviderConnectionError(str(exc)) from exc
 
-        return _normalize_anthropic_message(final_message)
+        return _normalize_anthropic_message(final_message, streamed=streamed)
 
     async def create_message_simple(
         self,
@@ -198,9 +198,20 @@ class GoogleClient(BaseModelClient):
 
     def __init__(self, config: AgentConfig):
         super().__init__(config)
+        import httpx
         from google import genai
-        from google.genai import types
+        from google.genai import errors, types
 
+        transport_errors: list[type[Exception]] = [httpx.HTTPError]
+        try:
+            import aiohttp
+        except ImportError:
+            pass
+        else:
+            transport_errors.append(aiohttp.ClientError)
+
+        self._google_api_error = errors.APIError
+        self._google_transport_errors = tuple(transport_errors)
         self._types = types
         self.client = genai.Client().aio
 
@@ -217,9 +228,7 @@ class GoogleClient(BaseModelClient):
             config_kwargs["system_instruction"] = system_text
         if tools:
             config_kwargs["tools"] = _google_tools(tools, self._types)
-            config_kwargs["automatic_function_calling"] = self._types.AutomaticFunctionCallingConfig(
-                disable=True
-            )
+            config_kwargs["automatic_function_calling"] = self._types.AutomaticFunctionCallingConfig(disable=True)
         config = self._types.GenerateContentConfig(**config_kwargs)
         try:
             response = await self.client.models.generate_content(
@@ -227,10 +236,10 @@ class GoogleClient(BaseModelClient):
                 contents=_google_contents(messages, self._types),
                 config=config,
             )
-        except Exception as exc:  # google-genai currently exposes transport-specific errors
-            if "connect" in str(exc).lower() or "dns" in str(exc).lower():
-                raise ProviderConnectionError(str(exc)) from exc
-            raise ProviderAPIError(str(exc)) from exc
+        except self._google_api_error as exc:
+            raise ProviderAPIError(exc.message or str(exc), status_code=exc.code) from exc
+        except self._google_transport_errors as exc:
+            raise ProviderConnectionError(str(exc)) from exc
 
         return _normalize_google_response(response)
 
@@ -248,10 +257,10 @@ class GoogleClient(BaseModelClient):
                 contents=_google_contents(messages, self._types),
                 config=config,
             )
-        except Exception as exc:
-            if "connect" in str(exc).lower() or "dns" in str(exc).lower():
-                raise ProviderConnectionError(str(exc)) from exc
-            raise ProviderAPIError(str(exc)) from exc
+        except self._google_api_error as exc:
+            raise ProviderAPIError(exc.message or str(exc), status_code=exc.code) from exc
+        except self._google_transport_errors as exc:
+            raise ProviderConnectionError(str(exc)) from exc
 
         return _normalize_google_response(response)
 
@@ -278,7 +287,7 @@ def extract_text_from_blocks(content: Any) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _normalize_anthropic_message(message: Any) -> AgentResponse:
+def _normalize_anthropic_message(message: Any, *, streamed: bool = False) -> AgentResponse:
     usage = Usage(
         input_tokens=getattr(message.usage, "input_tokens", 0) or 0,
         output_tokens=getattr(message.usage, "output_tokens", 0) or 0,
@@ -290,13 +299,15 @@ def _normalize_anthropic_message(message: Any) -> AgentResponse:
         if getattr(block, "type", None) == "text":
             content.append({"type": "text", "text": block.text})
         elif getattr(block, "type", None) == "tool_use":
-            content.append({
-                "type": "tool_use",
-                "id": block.id,
-                "name": block.name,
-                "input": block.input,
-            })
-    return AgentResponse(content=content, stop_reason=message.stop_reason, usage=usage)
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                }
+            )
+    return AgentResponse(content=content, stop_reason=message.stop_reason, usage=usage, streamed=streamed)
 
 
 def _normalize_openai_message(response: Any) -> AgentResponse:
@@ -311,12 +322,14 @@ def _normalize_openai_message(response: Any) -> AgentResponse:
             parsed_arguments = json.loads(arguments)
         except json.JSONDecodeError:
             parsed_arguments = {"raw_arguments": arguments}
-        content.append({
-            "type": "tool_use",
-            "id": tool_call.id,
-            "name": tool_call.function.name,
-            "input": parsed_arguments,
-        })
+        content.append(
+            {
+                "type": "tool_use",
+                "id": tool_call.id,
+                "name": tool_call.function.name,
+                "input": parsed_arguments,
+            }
+        )
 
     if message.tool_calls:
         stop_reason = "tool_use"
@@ -340,12 +353,14 @@ def _normalize_google_response(response: Any) -> AgentResponse:
 
     function_calls = getattr(response, "function_calls", None) or []
     for index, function_call in enumerate(function_calls, start=1):
-        content.append({
-            "type": "tool_use",
-            "id": getattr(function_call, "id", None) or f"google-call-{index}",
-            "name": function_call.name,
-            "input": dict(function_call.args or {}),
-        })
+        content.append(
+            {
+                "type": "tool_use",
+                "id": getattr(function_call, "id", None) or f"google-call-{index}",
+                "name": function_call.name,
+                "input": dict(function_call.args or {}),
+            }
+        )
 
     if function_calls:
         stop_reason = "tool_use"
@@ -416,14 +431,16 @@ def _openai_messages(
             tool_calls = []
             for block in content or []:
                 if isinstance(block, dict) and block.get("type") == "tool_use":
-                    tool_calls.append({
-                        "id": block["id"],
-                        "type": "function",
-                        "function": {
-                            "name": block["name"],
-                            "arguments": json.dumps(block.get("input", {})),
-                        },
-                    })
+                    tool_calls.append(
+                        {
+                            "id": block["id"],
+                            "type": "function",
+                            "function": {
+                                "name": block["name"],
+                                "arguments": json.dumps(block.get("input", {})),
+                            },
+                        }
+                    )
             assistant_message: dict[str, Any] = {"role": "assistant"}
             if text:
                 assistant_message["content"] = text
@@ -437,11 +454,13 @@ def _openai_messages(
         if role == "user" and isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
-                    converted.append({
-                        "role": "tool",
-                        "tool_call_id": block["tool_use_id"],
-                        "content": block["content"],
-                    })
+                    converted.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": block["tool_use_id"],
+                            "content": block["content"],
+                        }
+                    )
                 else:
                     converted.append({"role": "user", "content": str(block)})
             continue
@@ -458,10 +477,12 @@ def _google_contents(messages: list[dict[str, Any]], types_module: Any) -> list[
         content = message["content"]
 
         if role == "user" and isinstance(content, str):
-            contents.append(types_module.Content(
-                role="user",
-                parts=[types_module.Part.from_text(text=content)],
-            ))
+            contents.append(
+                types_module.Content(
+                    role="user",
+                    parts=[types_module.Part.from_text(text=content)],
+                )
+            )
             continue
 
         if role == "assistant":
@@ -473,10 +494,12 @@ def _google_contents(messages: list[dict[str, Any]], types_module: Any) -> list[
                 if block.get("type") == "text" and block.get("text"):
                     text_parts.append(types_module.Part.from_text(text=block["text"]))
                 elif block.get("type") == "tool_use":
-                    function_parts.append(types_module.Part.from_function_call(
-                        name=block["name"],
-                        args=block.get("input", {}),
-                    ))
+                    function_parts.append(
+                        types_module.Part.from_function_call(
+                            name=block["name"],
+                            args=block.get("input", {}),
+                        )
+                    )
             parts = [*text_parts, *function_parts]
             if parts:
                 contents.append(types_module.Content(role="model", parts=parts))
@@ -488,27 +511,27 @@ def _google_contents(messages: list[dict[str, Any]], types_module: Any) -> list[
                     tool_name = _find_tool_name(messages, block["tool_use_id"])
                     if not tool_name:
                         continue
-                    response_payload = (
-                        {"error": block["content"]}
-                        if block.get("is_error")
-                        else {"result": block["content"]}
-                    )
+                    response_payload = {"error": block["content"]} if block.get("is_error") else {"result": block["content"]}
                     part = types_module.Part.from_function_response(
                         name=tool_name,
                         response=response_payload,
                     )
                     contents.append(types_module.Content(role="tool", parts=[part]))
                 else:
-                    contents.append(types_module.Content(
-                        role="user",
-                        parts=[types_module.Part.from_text(text=str(block))],
-                    ))
+                    contents.append(
+                        types_module.Content(
+                            role="user",
+                            parts=[types_module.Part.from_text(text=str(block))],
+                        )
+                    )
             continue
 
-        contents.append(types_module.Content(
-            role=role,
-            parts=[types_module.Part.from_text(text=str(content))],
-        ))
+        contents.append(
+            types_module.Content(
+                role=role,
+                parts=[types_module.Part.from_text(text=str(content))],
+            )
+        )
 
     return contents
 

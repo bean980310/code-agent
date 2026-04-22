@@ -6,6 +6,7 @@ from typing import Any
 
 from .base import BaseTool, register_tool
 from ..types import ToolResult
+from ..ui import get_terminal_ui
 
 
 class AskUserTool(BaseTool):
@@ -28,8 +29,7 @@ class AskUserTool(BaseTool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         question = kwargs["question"]
         try:
-            print(f"\n[Agent asks]: {question}")
-            answer = input("> ")
+            answer = get_terminal_ui().ask_user(question)
             return ToolResult(tool_use_id="", content=f"User answered: {answer}")
         except (EOFError, KeyboardInterrupt):
             return ToolResult(tool_use_id="", content="User did not provide an answer", is_error=True)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 from .client import (
@@ -20,6 +19,7 @@ from .subagent.spawner import SubAgentSpawner
 from .tools.base import get_tool, get_tool_definitions
 from .tools.delegate import _delegate_tool
 from .types import AgentConfig
+from .ui import get_terminal_ui
 
 # Maximum consecutive API errors before giving up
 MAX_API_RETRIES = 3
@@ -36,6 +36,7 @@ class Agent:
         self.memory = MemoryStore(self.config.memory_dir)
         self.spawner = SubAgentSpawner(self.config)
         self.streaming = True  # Enable streaming output by default
+        self.ui = get_terminal_ui()
         # Wire spawner into the delegate tool
         _delegate_tool._spawner = self.spawner
 
@@ -68,7 +69,7 @@ class Agent:
 
             # Check if context needs summarization
             if self.context.estimated_tokens() > self.config.summarize_threshold:
-                print("[context] Summarizing conversation history...", file=sys.stderr)
+                self.ui.note("Summarizing conversation history to keep the context window healthy.")
                 await self.context.summarize(self.client)
 
             # Call Claude API with error recovery
@@ -78,7 +79,7 @@ class Agent:
             except ProviderAPIError as e:
                 consecutive_errors += 1
                 status = e.status_code if e.status_code is not None else "unknown"
-                print(f"[error] API error ({status}): {e.message}", file=sys.stderr)
+                self.ui.error(f"API error ({status}): {e.message}")
                 if consecutive_errors >= MAX_API_RETRIES:
                     return f"Failed after {MAX_API_RETRIES} API errors. Last error: {e.message}"
                 if e.status_code in {429, 503, 529}:  # Rate limit or overloaded
@@ -87,7 +88,7 @@ class Agent:
                 continue
             except ProviderConnectionError as e:
                 consecutive_errors += 1
-                print(f"[error] Connection error: {e}", file=sys.stderr)
+                self.ui.error(f"Connection error: {e}")
                 if consecutive_errors >= MAX_API_RETRIES:
                     return f"Connection failed after {MAX_API_RETRIES} retries."
                 import asyncio
@@ -99,10 +100,7 @@ class Agent:
             cache_read = getattr(usage, "cache_read_input_tokens", 0)
             cache_create = getattr(usage, "cache_creation_input_tokens", 0)
             if cache_read or cache_create:
-                print(
-                    f"[cache] read={cache_read} create={cache_create}",
-                    file=sys.stderr,
-                )
+                self.ui.cache(f"read={cache_read} create={cache_create}")
 
             # Store assistant response
             self.context.add_assistant_message(response.content)
@@ -110,20 +108,29 @@ class Agent:
             # Route based on stop reason
             if response.stop_reason == "end_turn":
                 final_text = extract_text_from_blocks(response.content)
+                self.ui.render_response(final_text, streamed=response.streamed)
                 await self.memory.save_session_summary(user_input, final_text)
                 return final_text
 
             if response.stop_reason == "tool_use":
+                self.ui.finish_stream()
                 tool_results = await self._execute_tools(response.content)
                 self.context.add_tool_results(tool_results)
                 continue
 
             if response.stop_reason == "max_tokens":
-                return extract_text_from_blocks(response.content) + "\n\n[Response truncated due to max tokens]"
+                final_text = extract_text_from_blocks(response.content)
+                self.ui.render_response(final_text, streamed=response.streamed)
+                self.ui.error("Response truncated because the model hit the max token limit.")
+                return final_text + "\n\n[Response truncated due to max tokens]"
 
             # Unknown stop reason — break to avoid infinite loop
+            self.ui.finish_stream()
             break
 
+        self.ui.render_response(
+            extract_text_from_blocks(self.context.get_last_assistant_content()),
+        )
         return extract_text_from_blocks(self.context.get_last_assistant_content())
 
     async def _call_api(self, system_prompt: list[dict]) -> Any:
@@ -131,18 +138,27 @@ class Agent:
         tools = get_tool_definitions()
         messages = self.context.get_messages()
 
-        if self.streaming:
-            return await self.client.create_message_streaming(
-                messages=messages,
-                system=system_prompt,
-                tools=tools,
-            )
-        else:
-            return await self.client.create_message(
-                messages=messages,
-                system=system_prompt,
-                tools=tools,
-            )
+        use_spinner = not (self.streaming and self.config.provider == "anthropic")
+
+        if use_spinner:
+            with self.ui.status(f"Asking {self.config.provider} / {self.config.resolved_model()}"):
+                if self.streaming:
+                    return await self.client.create_message_streaming(
+                        messages=messages,
+                        system=system_prompt,
+                        tools=tools,
+                    )
+                return await self.client.create_message(
+                    messages=messages,
+                    system=system_prompt,
+                    tools=tools,
+                )
+
+        return await self.client.create_message_streaming(
+            messages=messages,
+            system=system_prompt,
+            tools=tools,
+        )
 
     async def _execute_tools(self, content: Any) -> list[dict]:
         """Execute all tool_use blocks and return tool_result messages."""
@@ -152,7 +168,7 @@ class Agent:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
 
-            print(f"[tool] {block['name']}({_summarize_input(block['input'])})", file=sys.stderr)
+            self.ui.tool(f"{block['name']}({_summarize_input(block['input'])})")
 
             tool = get_tool(block["name"])
             if tool is None:
@@ -166,6 +182,8 @@ class Agent:
 
             try:
                 result = await tool.execute(**block["input"])
+                if result.is_error:
+                    self.ui.error(f"{block['name']} failed: {result.content}")
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": block["id"],
@@ -173,6 +191,7 @@ class Agent:
                     "is_error": result.is_error,
                 })
             except Exception as e:
+                self.ui.error(f"{block['name']} failed: {e}")
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": block["id"],

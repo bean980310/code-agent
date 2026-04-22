@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import sys
 
 from .agent import Agent
 from .config import load_config
+from .ui import TerminalUI, set_terminal_ui
 
 
 def main() -> None:
@@ -41,39 +41,46 @@ def main() -> None:
         overrides["working_dir"] = os.getcwd()
 
     config = load_config(overrides)
+    ui = TerminalUI()
+    set_terminal_ui(ui)
     agent = Agent(config)
 
+    ui.show_banner(
+        provider=config.provider,
+        model=config.resolved_model(),
+        working_dir=config.working_dir,
+        interactive=args.prompt is None,
+    )
+
     if args.prompt:
-        result = asyncio.run(agent.run(args.prompt))
-        print(result)
+        asyncio.run(agent.run(args.prompt))
     else:
         asyncio.run(_interactive_loop(agent))
 
 
 async def _interactive_loop(agent: Agent) -> None:
-    print("Code Agent (type 'exit' or Ctrl+C to quit)\n", file=sys.stderr)
+    ui = agent.ui
 
     while True:
         try:
-            user_input = input("> ")
+            user_input = ui.prompt()
         except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!", file=sys.stderr)
+            ui.note("Goodbye.")
             break
 
         stripped = user_input.strip()
         if not stripped:
             continue
         if stripped.lower() in ("exit", "quit"):
-            print("Goodbye!", file=sys.stderr)
+            ui.note("Goodbye.")
             break
 
         try:
-            result = await agent.run(stripped)
-            print(result)
+            await agent.run(stripped)
         except KeyboardInterrupt:
-            print("\n[Interrupted]", file=sys.stderr)
+            ui.error("Interrupted.")
         except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
+            ui.error(str(e))
 
         # Reset context between interactions in REPL mode
         agent.reset()

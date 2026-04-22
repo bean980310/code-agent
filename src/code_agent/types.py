@@ -15,19 +15,19 @@ PROVIDER_ALIASES = {
 }
 DEFAULT_PROVIDER_MODELS = {
     "anthropic": {
-        "main": "claude-sonnet-4-6",
-        "summary": "claude-haiku-4-5-20251001",
-        "subagent": "claude-haiku-4-5-20251001",
+        "main": "claude-opus-4-6",
+        "summary": "claude-sonnet-4-6",
+        "subagent": "claude-sonnet-4-6",
     },
     "openai": {
-        "main": "gpt-4.1",
-        "summary": "gpt-4.1-mini",
-        "subagent": "gpt-4.1-mini",
+        "main": "gpt-5.4",
+        "summary": "gpt-5.4-mini",
+        "subagent": "gpt-5.4-mini",
     },
     "google": {
-        "main": "gemini-2.5-pro",
-        "summary": "gemini-2.5-flash",
-        "subagent": "gemini-2.5-flash",
+        "main": "gemini-3.1-pro-preview",
+        "summary": "gemini-3-flash-preview",
+        "subagent": "gemini-3-flash-preview",
     },
 }
 
@@ -72,6 +72,7 @@ class AgentResponse:
     content: list[dict[str, Any]]
     stop_reason: str
     usage: Usage = field(default_factory=Usage)
+    streamed: bool = False
 
 
 def normalize_provider(provider: str) -> str:
