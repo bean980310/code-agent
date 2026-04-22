@@ -205,6 +205,40 @@ class Agent:
         """Reset conversation state for a new interaction."""
         self.context.clear()
 
+    def update_runtime_config(
+        self,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        max_turns: int | None = None,
+        reset_model_overrides: bool = False,
+    ) -> AgentConfig:
+        """Update runtime config values and rebuild dependent components."""
+        next_config = self.config.with_overrides()
+
+        if provider is not None:
+            next_config.provider = provider
+            if reset_model_overrides:
+                next_config.model = None
+                next_config.summary_model = None
+                next_config.subagent_model = None
+
+        if model is not None:
+            next_config.model = model
+
+        if max_turns is not None:
+            next_config.max_turns = max_turns
+
+        next_config.__post_init__()
+
+        self.config = next_config
+        self.client = create_client(self.config)
+        self.context.config = self.config
+        self.memory = MemoryStore(self.config.memory_dir)
+        self.spawner = SubAgentSpawner(self.config)
+        _delegate_tool._spawner = self.spawner
+        return self.config
+
 def _summarize_input(input_data: dict) -> str:
     """Create a short summary of tool input for logging."""
     parts: list[str] = []

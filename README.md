@@ -31,6 +31,15 @@ uv run python main.py --provider openai --model gpt-4.1 "테스트 코드 추가
 uv run python main.py --provider google --model gemini-2.5-pro "리팩터링 포인트 찾아줘"
 ```
 
+REPL 모드에서는 슬래시 명령으로 런타임 설정을 바꿀 수 있습니다.
+
+```bash
+/provider openai
+/model gpt-5.4
+/max-turns 20
+/config
+```
+
 환경 변수로도 설정할 수 있습니다.
 
 ```bash

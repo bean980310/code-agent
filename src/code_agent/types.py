@@ -15,7 +15,7 @@ PROVIDER_ALIASES = {
 }
 DEFAULT_PROVIDER_MODELS = {
     "anthropic": {
-        "main": "claude-opus-4-6",
+        "main": "claude-opus-4-7",
         "summary": "claude-sonnet-4-6",
         "subagent": "claude-sonnet-4-6",
     },
