@@ -5,9 +5,12 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-import anthropic
-
-from .client import ClaudeClient
+from .client import (
+    ProviderAPIError,
+    ProviderConnectionError,
+    create_client,
+    extract_text_from_blocks,
+)
 from .config import load_config
 from .context.manager import ContextManager
 from .context.prompt import build_system_prompt
@@ -27,7 +30,7 @@ class Agent:
 
     def __init__(self, config: AgentConfig | None = None):
         self.config = config or load_config()
-        self.client = ClaudeClient(self.config)
+        self.client = create_client(self.config)
         self.context = ContextManager(self.config)
         self.planner = Planner()
         self.memory = MemoryStore(self.config.memory_dir)
@@ -72,16 +75,17 @@ class Agent:
             try:
                 response = await self._call_api(system_prompt)
                 consecutive_errors = 0
-            except anthropic.APIStatusError as e:
+            except ProviderAPIError as e:
                 consecutive_errors += 1
-                print(f"[error] API error ({e.status_code}): {e.message}", file=sys.stderr)
+                status = e.status_code if e.status_code is not None else "unknown"
+                print(f"[error] API error ({status}): {e.message}", file=sys.stderr)
                 if consecutive_errors >= MAX_API_RETRIES:
                     return f"Failed after {MAX_API_RETRIES} API errors. Last error: {e.message}"
-                if e.status_code == 529:  # Overloaded
+                if e.status_code in {429, 503, 529}:  # Rate limit or overloaded
                     import asyncio
                     await asyncio.sleep(2 ** consecutive_errors)
                 continue
-            except anthropic.APIConnectionError as e:
+            except ProviderConnectionError as e:
                 consecutive_errors += 1
                 print(f"[error] Connection error: {e}", file=sys.stderr)
                 if consecutive_errors >= MAX_API_RETRIES:
@@ -105,7 +109,7 @@ class Agent:
 
             # Route based on stop reason
             if response.stop_reason == "end_turn":
-                final_text = _extract_text(response.content)
+                final_text = extract_text_from_blocks(response.content)
                 await self.memory.save_session_summary(user_input, final_text)
                 return final_text
 
@@ -115,14 +119,14 @@ class Agent:
                 continue
 
             if response.stop_reason == "max_tokens":
-                return _extract_text(response.content) + "\n\n[Response truncated due to max tokens]"
+                return extract_text_from_blocks(response.content) + "\n\n[Response truncated due to max tokens]"
 
             # Unknown stop reason — break to avoid infinite loop
             break
 
-        return _extract_text(self.context.get_last_assistant_content())
+        return extract_text_from_blocks(self.context.get_last_assistant_content())
 
-    async def _call_api(self, system_prompt: list[dict]) -> anthropic.types.Message:
+    async def _call_api(self, system_prompt: list[dict]) -> Any:
         """Call the API with optional streaming."""
         tools = get_tool_definitions()
         messages = self.context.get_messages()
@@ -145,34 +149,34 @@ class Agent:
         results: list[dict] = []
 
         for block in content:
-            if not hasattr(block, "type") or block.type != "tool_use":
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
 
-            print(f"[tool] {block.name}({_summarize_input(block.input)})", file=sys.stderr)
+            print(f"[tool] {block['name']}({_summarize_input(block['input'])})", file=sys.stderr)
 
-            tool = get_tool(block.name)
+            tool = get_tool(block["name"])
             if tool is None:
                 results.append({
                     "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": f"Error: Unknown tool '{block.name}'",
+                    "tool_use_id": block["id"],
+                    "content": f"Error: Unknown tool '{block['name']}'",
                     "is_error": True,
                 })
                 continue
 
             try:
-                result = await tool.execute(**block.input)
+                result = await tool.execute(**block["input"])
                 results.append({
                     "type": "tool_result",
-                    "tool_use_id": block.id,
+                    "tool_use_id": block["id"],
                     "content": result.content,
                     "is_error": result.is_error,
                 })
             except Exception as e:
                 results.append({
                     "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": f"Error executing tool '{block.name}': {e}",
+                    "tool_use_id": block["id"],
+                    "content": f"Error executing tool '{block['name']}': {e}",
                     "is_error": True,
                 })
 
@@ -181,18 +185,6 @@ class Agent:
     def reset(self) -> None:
         """Reset conversation state for a new interaction."""
         self.context.clear()
-
-
-def _extract_text(content: Any) -> str:
-    """Extract text blocks from a response content list."""
-    if isinstance(content, str):
-        return content
-    parts: list[str] = []
-    for block in content:
-        if hasattr(block, "type") and block.type == "text":
-            parts.append(block.text)
-    return "\n".join(parts)
-
 
 def _summarize_input(input_data: dict) -> str:
     """Create a short summary of tool input for logging."""

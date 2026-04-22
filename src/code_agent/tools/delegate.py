@@ -39,7 +39,7 @@ class DelegateTaskTool(BaseTool):
             },
             "model": {
                 "type": "string",
-                "description": "Model for the sub-agent. Defaults to claude-haiku-4-5 for cost efficiency.",
+                "description": "Model override for the sub-agent. Defaults to the provider's configured sub-agent model.",
             },
         },
         "required": ["task"],

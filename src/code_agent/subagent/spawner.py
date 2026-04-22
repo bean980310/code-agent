@@ -5,8 +5,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-import anthropic
-
+from ..client import create_client, extract_text_from_blocks
 from ..tools.base import get_tool, get_tool_definitions
 from ..types import AgentConfig
 
@@ -16,7 +15,6 @@ class SubAgentSpawner:
 
     def __init__(self, parent_config: AgentConfig):
         self.parent_config = parent_config
-        self.client = anthropic.AsyncAnthropic()
 
     async def spawn(
         self,
@@ -41,7 +39,12 @@ class SubAgentSpawner:
         Returns:
             The sub-agent's final text response.
         """
-        model = model or "claude-haiku-4-5-20251001"
+        child_config = self.parent_config.with_overrides(
+            model=model or self.parent_config.resolved_subagent_model(),
+            max_tokens=max_tokens,
+        )
+        client = create_client(child_config)
+        model_name = child_config.resolved_model()
 
         # Determine tool set
         if tool_names is None:
@@ -58,52 +61,51 @@ class SubAgentSpawner:
             )
 
         messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
+        system_blocks = [{"type": "text", "text": system_prompt}]
 
-        print(f"[subagent] Spawning ({model}) task: {task[:80]}...", file=sys.stderr)
+        print(f"[subagent] Spawning ({model_name}) task: {task[:80]}...", file=sys.stderr)
 
         for turn in range(max_turns):
-            response = await self.client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                system=system_prompt,
+            response = await client.create_message(
                 messages=messages,
-                tools=tools if tools else anthropic.NOT_GIVEN,
+                system=system_blocks,
+                tools=tools,
             )
 
             messages.append({"role": "assistant", "content": response.content})
 
             if response.stop_reason == "end_turn":
-                result = _extract_text(response.content)
+                result = extract_text_from_blocks(response.content)
                 print(f"[subagent] Completed in {turn + 1} turns", file=sys.stderr)
                 return result
 
             if response.stop_reason == "tool_use":
                 tool_results: list[dict] = []
                 for block in response.content:
-                    if not hasattr(block, "type") or block.type != "tool_use":
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
                         continue
-                    tool_impl = get_tool(block.name)
-                    if tool_impl and block.name in tool_names:
+                    tool_impl = get_tool(block["name"])
+                    if tool_impl and block["name"] in tool_names:
                         try:
-                            result = await tool_impl.execute(**block.input)
+                            result = await tool_impl.execute(**block["input"])
                             tool_results.append({
                                 "type": "tool_result",
-                                "tool_use_id": block.id,
+                                "tool_use_id": block["id"],
                                 "content": result.content,
                                 "is_error": result.is_error,
                             })
                         except Exception as e:
                             tool_results.append({
                                 "type": "tool_result",
-                                "tool_use_id": block.id,
+                                "tool_use_id": block["id"],
                                 "content": f"Error: {e}",
                                 "is_error": True,
                             })
                     else:
                         tool_results.append({
                             "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": f"Tool '{block.name}' not available to this sub-agent",
+                            "tool_use_id": block["id"],
+                            "content": f"Tool '{block['name']}' not available to this sub-agent",
                             "is_error": True,
                         })
                 messages.append({"role": "user", "content": tool_results})
@@ -112,14 +114,4 @@ class SubAgentSpawner:
             break
 
         # Fallback: extract whatever text we have
-        return _extract_text(messages[-1].get("content", ""))
-
-
-def _extract_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    parts: list[str] = []
-    for block in content:
-        if hasattr(block, "type") and block.type == "text":
-            parts.append(block.text)
-    return "\n".join(parts)
+        return extract_text_from_blocks(messages[-1].get("content", ""))

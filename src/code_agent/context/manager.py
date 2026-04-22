@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..client import extract_text_from_blocks
 from ..types import AgentConfig
 
 
@@ -108,13 +109,11 @@ class ContextManager:
                     f"{old_text}"
                 ),
             }],
-            model="claude-haiku-4-5-20251001",
+            model=self.config.resolved_summary_model(),
             max_tokens=4096,
         )
 
-        summary_text = next(
-            b.text for b in summary_response.content if b.type == "text"
-        )
+        summary_text = extract_text_from_blocks(summary_response.content)
 
         # Replace old messages with summary
         self.messages = [

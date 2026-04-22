@@ -1,11 +1,13 @@
 [project]
 name = "code-agent"
 version = "0.1.0"
-description = "A Python coding agent powered by Claude API"
+description = "A Python coding agent with pluggable model providers"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "anthropic>=0.52.0",
+    "google-genai>=1.14.0",
+    "openai>=1.78.0",
 ]
 
 [project.scripts]

@@ -14,16 +14,23 @@ from .config import load_config
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="code-agent",
-        description="A coding agent powered by Claude API",
+        description="A coding agent with pluggable model providers",
     )
     parser.add_argument("prompt", nargs="?", help="One-shot prompt (omit for interactive REPL)")
-    parser.add_argument("--model", default=None, help="Model to use (e.g. claude-sonnet-4-6)")
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help="Model provider to use (anthropic, openai, google)",
+    )
+    parser.add_argument("--model", default=None, help="Model to use (provider-specific)")
     parser.add_argument("--max-turns", type=int, default=None, help="Max agentic loop turns")
     parser.add_argument("--working-dir", default=None, help="Working directory")
 
     args = parser.parse_args()
 
     overrides: dict = {}
+    if args.provider:
+        overrides["provider"] = args.provider
     if args.model:
         overrides["model"] = args.model
     if args.max_turns:
