@@ -22,7 +22,7 @@ def main() -> None:
     parser.add_argument(
         "--provider",
         default=None,
-        help="Model provider to use (anthropic, openai, google)",
+        help="Model provider to use (anthropic, openai, google, huggingface, ollama, lmstudio)",
     )
     parser.add_argument("--model", default=None, help="Model to use (provider-specific)")
     parser.add_argument("--max-turns", type=int, default=None, help="Max agentic loop turns")
@@ -35,7 +35,9 @@ def main() -> None:
         overrides["provider"] = args.provider
     if args.model:
         overrides["model"] = args.model
-    if args.max_turns:
+    if args.max_turns is not None:
+        if args.max_turns <= 0:
+            parser.error("--max-turns must be a positive integer")
         overrides["max_turns"] = args.max_turns
     if args.working_dir:
         overrides["working_dir"] = os.path.abspath(args.working_dir)
@@ -81,8 +83,7 @@ async def _interactive_loop(agent: Agent) -> None:
             if command_result == "exit":
                 ui.note("Goodbye.")
                 break
-            if command_result:
-                continue
+            continue
 
         try:
             await agent.run(stripped)
@@ -90,9 +91,6 @@ async def _interactive_loop(agent: Agent) -> None:
             ui.error("Interrupted.")
         except Exception as e:
             ui.error(str(e))
-
-        # Reset context between interactions in REPL mode
-        agent.reset()
 
 
 def _handle_repl_command(agent: Agent, raw_command: str) -> bool | str:
@@ -111,10 +109,7 @@ def _handle_repl_command(agent: Agent, raw_command: str) -> bool | str:
     command = tokens[0].lower()
 
     if command in {"/help", "/?"}:
-        ui.note(
-            "Commands: /provider <anthropic|openai|google>, /model <name>, "
-            "/max-turns <n>, /config, /exit"
-        )
+        ui.note("Commands: /provider <anthropic|openai|google|huggingface|ollama|lmstudio>, /model <name>, /summary-model <name>, /subagent-model <name>, /max-turns <n>, /working-dir <path>, /reset, /config, /exit")
         return True
 
     if command in {"/exit", "/quit"}:
@@ -124,9 +119,14 @@ def _handle_repl_command(agent: Agent, raw_command: str) -> bool | str:
         _show_runtime_config(agent)
         return True
 
+    if command == "/reset":
+        agent.reset()
+        ui.note("Conversation context cleared.")
+        return True
+
     if command == "/provider":
         if len(tokens) != 2:
-            ui.error("Usage: /provider <anthropic|openai|google>")
+            ui.error("Usage: /provider <anthropic|openai|google|huggingface|ollama|lmstudio>")
             return True
 
         try:
@@ -137,21 +137,24 @@ def _handle_repl_command(agent: Agent, raw_command: str) -> bool | str:
 
         config = agent.update_runtime_config(provider=provider, reset_model_overrides=True)
         agent.reset()
-        ui.note(
-            f"Provider set to {config.provider}. "
-            f"Model reset to default: {config.resolved_model()}."
-        )
+        ui.note(f"Provider set to {config.provider}. Model reset to default: {config.resolved_model()}. Context cleared.")
         return True
 
-    if command == "/model":
+    model_commands = {
+        "/model": ("model", "resolved_model"),
+        "/summary-model": ("summary_model", "resolved_summary_model"),
+        "/subagent-model": ("subagent_model", "resolved_subagent_model"),
+    }
+    if command in model_commands:
         if len(tokens) < 2:
-            ui.error("Usage: /model <provider-specific-model-name>")
+            ui.error(f"Usage: {command} <provider-specific-model-name>")
             return True
 
+        field, resolver = model_commands[command]
         model = " ".join(tokens[1:]).strip()
-        config = agent.update_runtime_config(model=model)
-        agent.reset()
-        ui.note(f"Model set to {config.resolved_model()} for provider {config.provider}.")
+        config = agent.update_runtime_config(**{field: model})
+        resolved = getattr(config, resolver)()
+        ui.note(f"{field} set to {resolved} for provider {config.provider}.")
         return True
 
     if command == "/max-turns":
@@ -173,13 +176,24 @@ def _handle_repl_command(agent: Agent, raw_command: str) -> bool | str:
         ui.note(f"Max turns set to {config.max_turns}.")
         return True
 
+    if command == "/working-dir":
+        if len(tokens) < 2:
+            ui.error("Usage: /working-dir <path>")
+            return True
+
+        path = os.path.abspath(os.path.expanduser(" ".join(tokens[1:]).strip()))
+        if not os.path.isdir(path):
+            ui.error(f"Not a directory: {path}")
+            return True
+
+        config = agent.update_runtime_config(working_dir=path)
+        ui.note(f"Working directory set to {config.working_dir}.")
+        return True
+
     ui.error(f"Unknown command: {command}. Try /help.")
     return True
 
 
 def _show_runtime_config(agent: Agent) -> None:
     config = agent.config
-    agent.ui.note(
-        f"provider={config.provider} model={config.resolved_model()} "
-        f"max_turns={config.max_turns} cwd={config.working_dir}"
-    )
+    agent.ui.note(f"provider={config.provider} model={config.resolved_model()} summary={config.resolved_summary_model()} subagent={config.resolved_subagent_model()} max_turns={config.max_turns} max_tokens={config.max_tokens} summarize_threshold={config.summarize_threshold} cwd={config.working_dir}")

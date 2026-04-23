@@ -47,6 +47,10 @@ class BaseModelClient(ABC):
         """Fallback streaming path for providers without incremental output handling."""
         return await self.create_message(messages=messages, system=system, tools=tools)
 
+    def supports_streaming(self) -> bool:
+        """Whether this client renders streamed tokens incrementally."""
+        return False
+
     @abstractmethod
     async def create_message_simple(
         self,
@@ -119,6 +123,9 @@ class AnthropicClient(BaseModelClient):
 
         return _normalize_anthropic_message(final_message, streamed=streamed)
 
+    def supports_streaming(self) -> bool:
+        return True
+
     async def create_message_simple(
         self,
         messages: list[dict[str, Any]],
@@ -143,13 +150,24 @@ class AnthropicClient(BaseModelClient):
 class OpenAIClient(BaseModelClient):
     """OpenAI chat completions wrapper with normalized outputs."""
 
-    def __init__(self, config: AgentConfig):
+    def __init__(
+        self,
+        config: AgentConfig,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ):
         super().__init__(config)
         from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 
         self._api_connection_error = APIConnectionError
         self._api_status_error = APIStatusError
-        self.client = AsyncOpenAI()
+        client_kwargs: dict[str, Any] = {}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        if api_key:
+            client_kwargs["api_key"] = api_key
+        self.client = AsyncOpenAI(**client_kwargs)
 
     async def create_message(
         self,
@@ -157,14 +175,17 @@ class OpenAIClient(BaseModelClient):
         system: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> AgentResponse:
+        kwargs: dict[str, Any] = {
+            "model": self.config.resolved_model(),
+            "messages": _openai_messages(messages, system),
+            "max_tokens": self.config.max_tokens,
+        }
+        if tools:
+            kwargs["tools"] = _openai_tools(tools)
+            kwargs["tool_choice"] = "auto"
+
         try:
-            response = await self.client.chat.completions.create(
-                model=self.config.resolved_model(),
-                messages=_openai_messages(messages, system),
-                tools=_openai_tools(tools) if tools else None,
-                tool_choice="auto" if tools else None,
-                max_completion_tokens=self.config.max_tokens,
-            )
+            response = await self.client.chat.completions.create(**kwargs)
         except self._api_status_error as exc:
             raise ProviderAPIError(str(exc), status_code=exc.status_code) from exc
         except self._api_connection_error as exc:
@@ -183,7 +204,7 @@ class OpenAIClient(BaseModelClient):
             response = await self.client.chat.completions.create(
                 model=model or self.config.resolved_summary_model(),
                 messages=_openai_messages(messages, []),
-                max_completion_tokens=max_tokens,
+                max_tokens=max_tokens,
             )
         except self._api_status_error as exc:
             raise ProviderAPIError(str(exc), status_code=exc.status_code) from exc
@@ -265,6 +286,57 @@ class GoogleClient(BaseModelClient):
         return _normalize_google_response(response)
 
 
+class LMStudioClient(OpenAIClient):
+    """LM Studio local server (OpenAI-compatible)."""
+
+    def __init__(self, config: AgentConfig):
+        import os
+
+        super().__init__(
+            config,
+            base_url=os.getenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1"),
+            api_key=os.getenv("LMSTUDIO_API_KEY", "lm-studio"),
+        )
+
+
+class OllamaClient(OpenAIClient):
+    """Ollama local server (OpenAI-compatible)."""
+
+    def __init__(self, config: AgentConfig):
+        import os
+
+        base = os.getenv("OLLAMA_BASE_URL")
+        if not base:
+            host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+            if not host.startswith("http"):
+                host = f"http://{host}"
+            base = f"{host}/v1"
+        super().__init__(
+            config,
+            base_url=base,
+            api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
+        )
+
+
+class HuggingFaceClient(OpenAIClient):
+    """Hugging Face Inference Providers router (OpenAI-compatible)."""
+
+    def __init__(self, config: AgentConfig):
+        import os
+
+        api_key = (
+            os.getenv("HF_TOKEN")
+            or os.getenv("HUGGINGFACE_API_KEY")
+            or os.getenv("HUGGING_FACE_HUB_TOKEN")
+            or "hf-missing"
+        )
+        super().__init__(
+            config,
+            base_url=os.getenv("HF_BASE_URL", "https://router.huggingface.co/v1"),
+            api_key=api_key,
+        )
+
+
 def create_client(config: AgentConfig) -> BaseModelClient:
     """Create a provider-specific client from configuration."""
     if config.provider == "anthropic":
@@ -273,6 +345,12 @@ def create_client(config: AgentConfig) -> BaseModelClient:
         return OpenAIClient(config)
     if config.provider == "google":
         return GoogleClient(config)
+    if config.provider == "lmstudio":
+        return LMStudioClient(config)
+    if config.provider == "ollama":
+        return OllamaClient(config)
+    if config.provider == "huggingface":
+        return HuggingFaceClient(config)
     raise ValueError(f"Unsupported provider: {config.provider}")
 
 

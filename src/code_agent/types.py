@@ -7,11 +7,14 @@ from enum import Enum
 from typing import Any
 
 
-SUPPORTED_PROVIDERS = {"anthropic", "openai", "google"}
+SUPPORTED_PROVIDERS = {"anthropic", "openai", "google", "huggingface", "ollama", "lmstudio"}
 PROVIDER_ALIASES = {
     "claude": "anthropic",
     "gemini": "google",
     "google-genai": "google",
+    "gpt": "openai",
+    "hf": "huggingface",
+    "lms": "lmstudio",
 }
 DEFAULT_PROVIDER_MODELS = {
     "anthropic": {
@@ -28,6 +31,21 @@ DEFAULT_PROVIDER_MODELS = {
         "main": "gemini-3.1-pro-preview",
         "summary": "gemini-3-flash-preview",
         "subagent": "gemini-3-flash-preview",
+    },
+    "huggingface": {
+        "main": "meta-llama/Llama-3.3-70B-Instruct",
+        "summary": "meta-llama/Llama-3.1-8B-Instruct",
+        "subagent": "meta-llama/Llama-3.1-8B-Instruct",
+    },
+    "ollama": {
+        "main": "llama3.1",
+        "summary": "llama3.1",
+        "subagent": "llama3.1",
+    },
+    "lmstudio": {
+        "main": "local-model",
+        "summary": "local-model",
+        "subagent": "local-model",
     },
 }
 

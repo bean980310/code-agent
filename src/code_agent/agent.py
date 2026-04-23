@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+from dataclasses import replace
 from typing import Any
 
 from .client import (
@@ -39,6 +42,12 @@ class Agent:
         self.ui = get_terminal_ui()
         # Wire spawner into the delegate tool
         _delegate_tool._spawner = self.spawner
+        self._apply_working_dir()
+
+    def _apply_working_dir(self) -> None:
+        target = os.path.abspath(os.path.expanduser(self.config.working_dir))
+        if os.path.isdir(target) and os.getcwd() != target:
+            os.chdir(target)
 
     async def run(self, user_input: str) -> str:
         """Run the full agentic loop for a user request.
@@ -83,7 +92,6 @@ class Agent:
                 if consecutive_errors >= MAX_API_RETRIES:
                     return f"Failed after {MAX_API_RETRIES} API errors. Last error: {e.message}"
                 if e.status_code in {429, 503, 529}:  # Rate limit or overloaded
-                    import asyncio
                     await asyncio.sleep(2 ** consecutive_errors)
                 continue
             except ProviderConnectionError as e:
@@ -91,7 +99,6 @@ class Agent:
                 self.ui.error(f"Connection error: {e}")
                 if consecutive_errors >= MAX_API_RETRIES:
                     return f"Connection failed after {MAX_API_RETRIES} retries."
-                import asyncio
                 await asyncio.sleep(2 ** consecutive_errors)
                 continue
 
@@ -138,7 +145,7 @@ class Agent:
         tools = get_tool_definitions()
         messages = self.context.get_messages()
 
-        use_spinner = not (self.streaming and self.config.provider == "anthropic")
+        use_spinner = not (self.streaming and self.client.supports_streaming())
 
         if use_spinner:
             with self.ui.status(f"Asking {self.config.provider} / {self.config.resolved_model()}"):
@@ -210,33 +217,39 @@ class Agent:
         *,
         provider: str | None = None,
         model: str | None = None,
+        summary_model: str | None = None,
+        subagent_model: str | None = None,
         max_turns: int | None = None,
+        working_dir: str | None = None,
         reset_model_overrides: bool = False,
     ) -> AgentConfig:
         """Update runtime config values and rebuild dependent components."""
-        next_config = self.config.with_overrides()
-
+        updates: dict[str, Any] = {}
         if provider is not None:
-            next_config.provider = provider
+            updates["provider"] = provider
             if reset_model_overrides:
-                next_config.model = None
-                next_config.summary_model = None
-                next_config.subagent_model = None
-
+                updates["model"] = None
+                updates["summary_model"] = None
+                updates["subagent_model"] = None
         if model is not None:
-            next_config.model = model
-
+            updates["model"] = model
+        if summary_model is not None:
+            updates["summary_model"] = summary_model
+        if subagent_model is not None:
+            updates["subagent_model"] = subagent_model
         if max_turns is not None:
-            next_config.max_turns = max_turns
+            updates["max_turns"] = max_turns
+        if working_dir is not None:
+            updates["working_dir"] = working_dir
 
-        next_config.__post_init__()
-
-        self.config = next_config
+        self.config = replace(self.config, **updates)
         self.client = create_client(self.config)
         self.context.config = self.config
         self.memory = MemoryStore(self.config.memory_dir)
         self.spawner = SubAgentSpawner(self.config)
         _delegate_tool._spawner = self.spawner
+        if working_dir is not None:
+            self._apply_working_dir()
         return self.config
 
 def _summarize_input(input_data: dict) -> str:
