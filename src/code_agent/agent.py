@@ -47,7 +47,10 @@ class Agent:
     def _apply_working_dir(self) -> None:
         target = os.path.abspath(os.path.expanduser(self.config.working_dir))
         if os.path.isdir(target) and os.getcwd() != target:
-            os.chdir(target)
+            try:
+                os.chdir(target)
+            except OSError as e:
+                self.ui.error(f"Failed to change working directory: {e}")
 
     async def run(self, user_input: str) -> str:
         """Run the full agentic loop for a user request.
@@ -92,14 +95,14 @@ class Agent:
                 if consecutive_errors >= MAX_API_RETRIES:
                     return f"Failed after {MAX_API_RETRIES} API errors. Last error: {e.message}"
                 if e.status_code in {429, 503, 529}:  # Rate limit or overloaded
-                    await asyncio.sleep(2 ** consecutive_errors)
+                    await asyncio.sleep(2**consecutive_errors)
                 continue
             except ProviderConnectionError as e:
                 consecutive_errors += 1
                 self.ui.error(f"Connection error: {e}")
                 if consecutive_errors >= MAX_API_RETRIES:
                     return f"Connection failed after {MAX_API_RETRIES} retries."
-                await asyncio.sleep(2 ** consecutive_errors)
+                await asyncio.sleep(2**consecutive_errors)
                 continue
 
             # Log usage for cache debugging
@@ -179,32 +182,38 @@ class Agent:
 
             tool = get_tool(block["name"])
             if tool is None:
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block["id"],
-                    "content": f"Error: Unknown tool '{block['name']}'",
-                    "is_error": True,
-                })
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": f"Error: Unknown tool '{block['name']}'",
+                        "is_error": True,
+                    }
+                )
                 continue
 
             try:
                 result = await tool.execute(**block["input"])
                 if result.is_error:
                     self.ui.error(f"{block['name']} failed: {result.content}")
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block["id"],
-                    "content": result.content,
-                    "is_error": result.is_error,
-                })
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": result.content,
+                        "is_error": result.is_error,
+                    }
+                )
             except Exception as e:
                 self.ui.error(f"{block['name']} failed: {e}")
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block["id"],
-                    "content": f"Error executing tool '{block['name']}': {e}",
-                    "is_error": True,
-                })
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": f"Error executing tool '{block['name']}': {e}",
+                        "is_error": True,
+                    }
+                )
 
         return results
 
@@ -251,6 +260,7 @@ class Agent:
         if working_dir is not None:
             self._apply_working_dir()
         return self.config
+
 
 def _summarize_input(input_data: dict) -> str:
     """Create a short summary of tool input for logging."""

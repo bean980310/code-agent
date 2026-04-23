@@ -324,12 +324,9 @@ class HuggingFaceClient(OpenAIClient):
     def __init__(self, config: AgentConfig):
         import os
 
-        api_key = (
-            os.getenv("HF_TOKEN")
-            or os.getenv("HUGGINGFACE_API_KEY")
-            or os.getenv("HUGGING_FACE_HUB_TOKEN")
-            or "hf-missing"
-        )
+        api_key = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_API_KEY") or os.getenv("HUGGING_FACE_HUB_TOKEN")
+        if not api_key:
+            raise ValueError("Missing Hugging Face token. Set HF_TOKEN, HUGGINGFACE_API_KEY, or HUGGING_FACE_HUB_TOKEN.")
         super().__init__(
             config,
             base_url=os.getenv("HF_BASE_URL", "https://router.huggingface.co/v1"),

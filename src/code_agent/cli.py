@@ -196,4 +196,14 @@ def _handle_repl_command(agent: Agent, raw_command: str) -> bool | str:
 
 def _show_runtime_config(agent: Agent) -> None:
     config = agent.config
-    agent.ui.note(f"provider={config.provider} model={config.resolved_model()} summary={config.resolved_summary_model()} subagent={config.resolved_subagent_model()} max_turns={config.max_turns} max_tokens={config.max_tokens} summarize_threshold={config.summarize_threshold} cwd={config.working_dir}")
+    lines = [
+        f"provider={config.provider}",
+        f"model={config.resolved_model()}",
+        f"summary model={config.resolved_summary_model()}",
+        f"subagent model={config.resolved_subagent_model()}",
+        f"max turns={config.max_turns}",
+        f"max tokens={config.max_tokens}",
+        f"summarize threshold={config.summarize_threshold}",
+        f"working dir={config.working_dir}",
+    ]
+    agent.ui.note("\n".join(lines))
