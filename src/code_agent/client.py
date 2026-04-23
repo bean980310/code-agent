@@ -299,23 +299,68 @@ class LMStudioClient(OpenAIClient):
         )
 
 
-class OllamaClient(OpenAIClient):
-    """Ollama local server (OpenAI-compatible)."""
+class OllamaClient(BaseModelClient):
+    """Ollama local server using the official ollama Python SDK."""
 
     def __init__(self, config: AgentConfig):
+        super().__init__(config)
         import os
+        import httpx
+        from ollama import AsyncClient, ResponseError
 
-        base = os.getenv("OLLAMA_BASE_URL")
-        if not base:
-            host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-            if not host.startswith("http"):
-                host = f"http://{host}"
-            base = f"{host}/v1"
-        super().__init__(
-            config,
-            base_url=base,
-            api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
-        )
+        host = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        host = host.rstrip("/")
+        if host.endswith("/v1"):
+            host = host[:-3]
+        if not host.startswith("http"):
+            host = f"http://{host}"
+
+        self._response_error = ResponseError
+        self._httpx_error = httpx.HTTPError
+        self.client = AsyncClient(host=host)
+
+    async def create_message(
+        self,
+        messages: list[dict[str, Any]],
+        system: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> AgentResponse:
+        kwargs: dict[str, Any] = {
+            "model": self.config.resolved_model(),
+            "messages": _ollama_messages(messages, system),
+            "options": {"num_predict": self.config.max_tokens},
+        }
+        if tools:
+            kwargs["tools"] = _openai_tools(tools)
+
+        try:
+            response = await self.client.chat(**kwargs)
+        except self._response_error as exc:
+            raise ProviderAPIError(exc.error, status_code=exc.status_code) from exc
+        except self._httpx_error as exc:
+            raise ProviderConnectionError(str(exc)) from exc
+
+        return _normalize_ollama_response(response)
+
+    async def create_message_simple(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str | None = None,
+        max_tokens: int = 4096,
+    ) -> AgentResponse:
+        try:
+            response = await self.client.chat(
+                model=model or self.config.resolved_summary_model(),
+                messages=_ollama_messages(messages, []),
+                options={"num_predict": max_tokens},
+            )
+        except self._response_error as exc:
+            raise ProviderAPIError(exc.error, status_code=exc.status_code) from exc
+        except self._httpx_error as exc:
+            raise ProviderConnectionError(str(exc)) from exc
+
+        return _normalize_ollama_response(response)
 
 
 class HuggingFaceClient(OpenAIClient):
@@ -543,6 +588,109 @@ def _openai_messages(
         converted.append({"role": role, "content": str(content)})
 
     return converted
+
+
+def _ollama_messages(
+    messages: list[dict[str, Any]],
+    system: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    system_text = _system_text(system)
+    if system_text:
+        converted.append({"role": "system", "content": system_text})
+
+    for message in messages:
+        role = message["role"]
+        content = message["content"]
+
+        if role == "user" and isinstance(content, str):
+            converted.append({"role": "user", "content": content})
+            continue
+
+        if role == "assistant":
+            text = extract_text_from_blocks(content)
+            tool_calls = []
+            for block in content or []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_calls.append(
+                        {
+                            "function": {
+                                "name": block["name"],
+                                "arguments": block.get("input", {}),
+                            },
+                        }
+                    )
+            assistant_message: dict[str, Any] = {"role": "assistant", "content": text or ""}
+            if tool_calls:
+                assistant_message["tool_calls"] = tool_calls
+            converted.append(assistant_message)
+            continue
+
+        if role == "user" and isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tool_name = _find_tool_name(messages, block["tool_use_id"])
+                    tool_message: dict[str, Any] = {
+                        "role": "tool",
+                        "content": str(block.get("content", "")),
+                    }
+                    if tool_name:
+                        tool_message["tool_name"] = tool_name
+                    converted.append(tool_message)
+                else:
+                    converted.append({"role": "user", "content": str(block)})
+            continue
+
+        converted.append({"role": role, "content": str(content)})
+
+    return converted
+
+
+def _normalize_ollama_response(response: Any) -> AgentResponse:
+    message = getattr(response, "message", None) or response.get("message", {})
+    message_content = getattr(message, "content", None) if not isinstance(message, dict) else message.get("content")
+    tool_calls_raw = getattr(message, "tool_calls", None) if not isinstance(message, dict) else message.get("tool_calls")
+    tool_calls_raw = tool_calls_raw or []
+
+    content: list[dict[str, Any]] = []
+    if message_content:
+        content.append({"type": "text", "text": message_content})
+
+    for index, tool_call in enumerate(tool_calls_raw, start=1):
+        function = getattr(tool_call, "function", None) if not isinstance(tool_call, dict) else tool_call.get("function")
+        name = getattr(function, "name", None) if not isinstance(function, dict) else function.get("name")
+        if not name:
+            continue  # Skip malformed tool calls without a name
+        arguments = getattr(function, "arguments", None) if not isinstance(function, dict) else function.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {"raw_arguments": arguments}
+        content.append(
+            {
+                "type": "tool_use",
+                "id": f"ollama-call-{index}",
+                "name": name,
+                "input": dict(arguments or {}),
+            }
+        )
+
+    done_reason = getattr(response, "done_reason", None) if not isinstance(response, dict) else response.get("done_reason")
+    if tool_calls_raw:
+        stop_reason = "tool_use"
+    elif done_reason == "length":
+        stop_reason = "max_tokens"
+    else:
+        stop_reason = "end_turn"
+
+    prompt_tokens = getattr(response, "prompt_eval_count", None) if not isinstance(response, dict) else response.get("prompt_eval_count")
+    eval_tokens = getattr(response, "eval_count", None) if not isinstance(response, dict) else response.get("eval_count")
+    usage = Usage(
+        input_tokens=prompt_tokens or 0,
+        output_tokens=eval_tokens or 0,
+    )
+    return AgentResponse(content=content, stop_reason=stop_reason, usage=usage)
 
 
 def _google_contents(messages: list[dict[str, Any]], types_module: Any) -> list[Any]:
