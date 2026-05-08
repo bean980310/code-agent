@@ -1,0 +1,25 @@
+{
+  "dependencies": {
+    "typescript": "^6.0.3"
+  },
+  "name": "code-agent",
+  "version": "1.0.0",
+  "description": "Python 기반 coding agent입니다. `uv`로 실행하며 Anthropic, OpenAI, Google Gemini provider를 선택할 수 있습니다.",
+  "main": "index.js",
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bean980310/code-agent.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/bean980310/code-agent/issues"
+  },
+  "homepage": "https://github.com/bean980310/code-agent#readme"
+}
